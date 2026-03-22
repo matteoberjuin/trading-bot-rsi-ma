@@ -22,20 +22,20 @@ CONFIG = {
 
     "initial_cash":  10_000,
 
-    "rsi_period":    14,
-    "rsi_oversold":  40,
-    "rsi_overbought": 85,
+    "rsi_period":     25,
+    "rsi_oversold":   48,
+    "rsi_overbought": 80,
 
     "ma_fast":       20,
-    "ma_slow":       50,
-
-    
-
+    "ma_slow":        50,
 
     "position_size": 1.0,
 
-    "atr_multiplier": 2.0,    
-    "stop_loss_pct":  0.08,
+    "atr_period":       14,      
+    "atr_multiplier": 3.0,
+    "fee":              0.001,
+
+    "slippage": 0.001,
     
 }
 
@@ -69,7 +69,7 @@ def add_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         (df["High"] - df["Close"].shift(1)).abs(),
         (df["Low"]  - df["Close"].shift(1)).abs()
     ], axis=1).max(axis=1)
-    df["ATR"] = df["TR"].rolling(14).mean()
+    df["ATR"] = df["TR"].rolling(cfg["atr_period"]).mean()
 
     return df
 
@@ -90,7 +90,7 @@ def generate_signals(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
 
     buy_signal = cond_macd & cond_ma
-    buy_signal2 = cond_rsi & (df["MACD_hist"] > 0)
+    buy_signal2 = cond_rsi & (df["MACD_hist"] > 0) & cond_ma
 
     df.loc[buy_signal | buy_signal2, "signal"] = 1
 
@@ -105,83 +105,60 @@ def generate_signals(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 def run_backtest(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    cash       = cfg["initial_cash"]
-    shares     = 0
-    position   = 0          
-    trades     = []
-    portfolio  = []
-    entry_price = 0
+    cash          = cfg["initial_cash"]
+    shares        = 0
+    position      = 0
+    trades        = []
+    portfolio     = []
+    entry_price   = 0
     trailing_stop = 0
     fee           = cfg.get("fee", 0.001)
 
     for date, row in df.iterrows():
-        price = row["Close"]
+        price = row["Open"]
         sig   = row["signal"]
         atr   = row["ATR"] if not np.isnan(row["ATR"]) else price * 0.05
 
         if sig == 1 and position == 0 and not np.isnan(row["MA_slow"]):
-            shares      = (cash * cfg["position_size"]) / price
-            cash       -= shares * price
-            position    = 1
-            entry_price = price
-            trailing_stop = price - cfg["atr_multiplier"] * atr
-            trades.append({"date": date, "type": "BUY", "price": price, "shares": shares})
-
-        elif sig == -1 and position == 1:
-            cash    += shares * price
-            pnl      = (price - entry_price) * shares
-            trades.append({"date": date, "type": "SELL", "price": price,
-                           "shares": shares, "pnl": pnl,
-                           "return_%": (price / entry_price - 1) * 100})
-            shares   = 0
-            position = 0
+            exec_price    = price * (1 + cfg.get("slippage", 0))
+            shares        = (cash * cfg["position_size"]) / exec_price * (1 - fee)
+            cash         -= shares * exec_price / (1 - fee)
+            position      = 1
+            entry_price   = exec_price
+            trailing_stop = exec_price - cfg["atr_multiplier"] * atr
+            trades.append({"date": date, "type": "BUY", "price": exec_price, "shares": shares})
 
         elif position == 1:
-            # Met à jour le trailing stop si le prix monte
             new_stop      = price - cfg["atr_multiplier"] * atr
             trailing_stop = max(trailing_stop, new_stop)
 
-            # — STOP LOSS DÉCLENCHÉ —
             if price <= trailing_stop:
-                cash += shares * price * (1 - fee)
-                pnl   = (price - entry_price) * shares
-                trades.append({"date": date, "type": "SELL",
-                               "price": price, "shares": shares,
-                               "pnl": pnl,
-                               "return_%": (price / entry_price - 1) * 100,
-                               "exit": "stop_loss"})
+                exec_price = price * (1 - cfg.get("slippage", 0))
+                cash += shares * exec_price * (1 - fee)
+                pnl   = (exec_price - entry_price) * shares
+                trades.append({"date": date, "type": "SELL","price": exec_price, "shares": shares,"pnl": pnl,"return_%": (exec_price / entry_price - 1) * 100,"exit": "stop_loss"})
                 shares        = 0
                 position      = 0
                 trailing_stop = 0
 
-            # — SIGNAL DE VENTE NORMAL —
             elif sig == -1:
-                cash += shares * price * (1 - fee)
-                pnl   = (price - entry_price) * shares
-                trades.append({"date": date, "type": "SELL",
-                               "price": price, "shares": shares,
-                               "pnl": pnl,
-                               "return_%": (price / entry_price - 1) * 100,
-                               "exit": "signal"})
+                exec_price = price * (1 - cfg.get("slippage", 0))
+                cash += shares * exec_price * (1 - fee)
+                pnl   = (exec_price - entry_price) * shares
+                trades.append({"date": date, "type": "SELL","price": exec_price, "shares": shares,"pnl": pnl,"return_%": (exec_price / entry_price - 1) * 100,"exit": "signal"})
                 shares        = 0
                 position      = 0
                 trailing_stop = 0
 
-        # Valorisation quotidienne
         portfolio_value = cash + shares * price
-        portfolio.append({"date": date, "value": portfolio_value,
-                          "price": price, "position": position})
+        portfolio.append({"date": date, "value": portfolio_value,"price": price, "position": position})
 
-    # Force-close à la fin
     if position == 1:
-        price = df["Close"].iloc[-1]
-        cash += shares * price * (1 - fee)
-        pnl   = (price - entry_price) * shares
-        trades.append({"date": df.index[-1], "type": "SELL",
-                       "price": price, "shares": shares,
-                       "pnl": pnl,
-                       "return_%": (price / entry_price - 1) * 100,
-                       "exit": "force_close"})
+        price = df["Open"].iloc[-1]
+        exec_price = price * (1 - cfg.get("slippage", 0))
+        cash += shares * exec_price * (1 - fee)
+        pnl   = (exec_price - entry_price) * shares
+        trades.append({"date": df.index[-1], "type": "SELL","price": exec_price, "shares": shares,"pnl": pnl,"return_%": (exec_price / entry_price - 1) * 100,"exit": "force_close"})
 
     portfolio_df = pd.DataFrame(portfolio).set_index("date")
     trades_df    = pd.DataFrame(trades)
@@ -398,6 +375,8 @@ def main():
 
     df = add_indicators(raw, cfg)
     df = generate_signals(df, cfg)
+    df["signal"] = df["signal"].shift(1)
+    
 
     print("🔄 Running backtest...")
     portfolio_df, trades_df = run_backtest(df, cfg)
@@ -415,9 +394,9 @@ def main():
     plot_results(df, portfolio_df, trades_df, metrics, cfg)
 
     print("\n✅ Done!")
-
-    print("\n🔍 Lancement du Grid Search sur 2018-2022...")
-    train_raw = yf.download(cfg["ticker"], start="2018-01-01", end="2022-12-31",
+    '''
+    print("\n🔍 Lancement du Grid Search sur 2018-2024...")
+    train_raw = yf.download(cfg["ticker"], start="2018-01-01", end="2024-12-31",
                         auto_adjust=True, progress=False)
     if isinstance(train_raw.columns, pd.MultiIndex):
         train_raw.columns = train_raw.columns.get_level_values(0)
@@ -425,9 +404,23 @@ def main():
     best_params = grid_search(train_raw)
 
     if best_params:
-        print(f"Meilleurs paramètres trouvés : {best_params}")
+        print(f"\n✅ Meilleurs paramètres : {best_params}")
         cfg.update(best_params)
 
+        print("\n🚀 Relance avec les meilleurs paramètres...")
+        df = add_indicators(raw, cfg)
+        df = generate_signals(df, cfg)
+        portfolio_df, trades_df = run_backtest(df, cfg)
+        metrics = compute_metrics(portfolio_df, trades_df, cfg)
+
+        print("\n" + "─" * 42)
+        print(f"  OPTIMISED RESULTS — {cfg['ticker']}")
+        print("─" * 42)
+        for k, v in metrics.items():
+            print(f"  {k:<28} {v}")
+        print("─" * 42)
+        plot_results(df, portfolio_df, trades_df, metrics, cfg)
+    '''
 
 if __name__ == "__main__":
     main()
