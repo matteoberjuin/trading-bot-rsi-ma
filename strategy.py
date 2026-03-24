@@ -15,8 +15,8 @@ warnings.filterwarnings('ignore')
 
 CONFIG = {
     "ticker":           "BTC-USD",
-    "start": "2018-01-01",
-    "end":   "2024-12-31",  
+    "start": "2025-01-01",
+    "end":   "2026-03-01",  
 
     "risk_free_rate":   0.05,
 
