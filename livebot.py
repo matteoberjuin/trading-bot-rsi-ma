@@ -25,7 +25,7 @@ CONFIG = {
     "atr_multiplier": 3.0,
 }
 
-# --- INITIALISATION ---
+
 exchange = ccxt.binance({
     'apiKey': API_KEY,
     'secret': API_SECRET,
@@ -65,11 +65,33 @@ def add_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["ATR"] = df["TR"].rolling(cfg["atr_period"]).mean()
     return df
 
+def display_balance():
+    try:
+
+        balance = exchange.fetch_balance()
+        
+
+        btc_total = balance['total'].get('BTC', 0)
+        usdt_total = balance['total'].get('USDT', 0)
+        
+        print(f"\n {usdt_total:} USDT | {btc_total:} BTC")
+        return btc_total, usdt_total
+    except Exception as e:
+        print(f"\n❌ Erreur lors de la récupération du solde : {e}")
+        return 0, 0
+
 def main():
     print(f"🚀 Bot en ligne sur {SYMBOL} ({TIMEFRAME})")
+    btc_total, usdt_total = display_balance()
+    if btc_total > 0.0001:
+        try:
+            exchange.create_market_sell_order(SYMBOL, btc_total)
+            time.sleep(2)
+            btc_total, usdt_total = display_balance()
+        except Exception as e:
+            print(f"❌ Erreur lors du nettoyage : {e}")
     in_position = False 
     trailing_stop = 0.0
-
     while True:
         try:
             bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
@@ -113,11 +135,10 @@ def main():
                 in_position = False
                 trailing_stop = 0.0
 
-            time.sleep(10) 
+            time.sleep(60) 
 
         except Exception as e:
             print(f"\n❌ Erreur : {e}")
-            time.sleep(30)
-
+            time.sleep(60)
 if __name__ == "__main__":
     main()
